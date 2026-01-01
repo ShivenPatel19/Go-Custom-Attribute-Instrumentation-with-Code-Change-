@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
 
 	_ "github.com/lib/pq"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Database holds the database connection
@@ -32,8 +35,41 @@ func NewDatabase(host, port, user, password, dbname string) (*Database, error) {
 	return &Database{DB: db}, nil
 }
 
+// QueryRowWithTracing executes a query and adds tracing attributes to the current span
+func (d *Database) QueryRowWithTracing(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(
+		attribute.String("apm.db.system", "postgresql"),
+		attribute.String("apm.db.statement", query),
+	)
+
+	row := d.DB.QueryRowContext(ctx, query, args...)
+	if err := row.Err(); err != nil {
+		span.RecordError(err)
+	}
+
+	return row
+}
+
+// ExecWithTracing executes a query and adds tracing attributes to the current span
+func (d *Database) ExecWithTracing(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(
+		attribute.String("apm.db.system", "postgresql"),
+		attribute.String("apm.db.statement", query),
+	)
+
+	result, err := d.DB.ExecContext(ctx, query, args...)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
+	return result, nil
+}
+
 // InitSchema creates the go_user_tbl table if it doesn't exist
-func (d *Database) InitSchema() error {
+func (d *Database) InitSchema(ctx context.Context) error {
 	query := `
 	CREATE TABLE IF NOT EXISTS go_user_tbl (
 		username VARCHAR(50) PRIMARY KEY,
@@ -45,7 +81,7 @@ func (d *Database) InitSchema() error {
 	);
 	`
 
-	_, err := d.DB.Exec(query)
+	_, err := d.ExecWithTracing(ctx, query)
 	if err != nil {
 		return fmt.Errorf("error creating schema: %w", err)
 	}
@@ -53,7 +89,7 @@ func (d *Database) InitSchema() error {
 	log.Println("Database schema initialized")
 
 	// Insert dummy data
-	if err := d.insertDummyData(); err != nil {
+	if err := d.insertDummyData(ctx); err != nil {
 		return fmt.Errorf("error inserting dummy data: %w", err)
 	}
 
@@ -61,10 +97,10 @@ func (d *Database) InitSchema() error {
 }
 
 // insertDummyData inserts dummy users if the table is empty
-func (d *Database) insertDummyData() error {
+func (d *Database) insertDummyData(ctx context.Context) error {
 	// Check if table has data
 	var count int
-	err := d.DB.QueryRow("SELECT COUNT(*) FROM go_user_tbl").Scan(&count)
+	err := d.QueryRowWithTracing(ctx, "SELECT COUNT(*) FROM go_user_tbl").Scan(&count)
 	if err != nil {
 		return err
 	}
@@ -93,7 +129,7 @@ func (d *Database) insertDummyData() error {
 			INSERT INTO go_user_tbl (username, name, email, age, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		`
-		_, err := d.DB.Exec(query, user.username, user.name, user.email, user.age)
+		_, err := d.ExecWithTracing(ctx, query, user.username, user.name, user.email, user.age)
 		if err != nil {
 			return fmt.Errorf("error inserting user %s: %w", user.username, err)
 		}

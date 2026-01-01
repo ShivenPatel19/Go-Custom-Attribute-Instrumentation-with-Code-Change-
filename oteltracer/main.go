@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	_ "oteltracer/docs" // Import the generated docs package
+
 	httpSwagger "github.com/swaggo/http-swagger/v2"
 )
 
@@ -19,10 +21,12 @@ import (
 // @BasePath /
 // @schemes http
 
-
 func main() {
 	// Load environment variables from .env file
 	loadEnv()
+
+	// The user's zero-code instrumentation will handle OTel setup.
+	ctx := context.Background()
 
 	// Get database configuration from environment variables
 	dbHost := getEnv("DB_HOST", "localhost")
@@ -40,45 +44,20 @@ func main() {
 	defer db.Close()
 
 	// Initialize schema
-	if err := db.InitSchema(); err != nil {
+	if err := db.InitSchema(ctx); err != nil {
 		log.Fatalf("Failed to initialize schema: %v", err)
 	}
 
 	// Initialize repository and handler
 	userRepo := NewUserRepository(db)
 	userHandler := NewUserHandler(userRepo)
+	tracedUserHandler := NewTracedUserHandler(userHandler)
 
 	// Setup routes
 	mux := http.NewServeMux()
-	
+
 	// User routes
-	mux.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
-		username := strings.TrimPrefix(r.URL.Path, "/users/")
-		if username == "" {
-			// /users endpoint
-			switch r.Method {
-			case http.MethodGet:
-				userHandler.GetAllUsers(w, r)
-			case http.MethodPost:
-				userHandler.CreateUser(w, r)
-			default:
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			}
-		} else {
-			// /users/{username} endpoint
-			r.SetPathValue("username", username)
-			switch r.Method {
-			case http.MethodGet:
-				userHandler.GetUser(w, r)
-			case http.MethodPut:
-				userHandler.UpdateUser(w, r)
-			case http.MethodDelete:
-				userHandler.DeleteUser(w, r)
-			default:
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			}
-		}
-	})
+	mux.Handle("/users/", tracedUserHandler)
 
 	// Health check endpoint
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +109,7 @@ func loadEnv() {
 		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue
 		}
-		
+
 		// Split by first equals sign
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
